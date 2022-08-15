@@ -1,10 +1,33 @@
 import random
+from statistics import mode
+from time import time
 import numpy as np
 import torch
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import os
 import resnet
+from torch.autograd.variable import Variable
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
 
 
 def set_seed(seed=233): 
@@ -317,3 +340,127 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
+
+
+def get_weights(net):
+    """ Extract parameters from net, and return a list of tensors"""
+    return [p.data for p in net.parameters()]
+
+
+def get_random_weights(weights):
+    """
+        Produce a random direction that is a list of random Gaussian tensors
+        with the same shape as the network's weights, so one direction entry per weight.
+    """
+    return [torch.randn(w.size()) for w in weights]
+
+
+def normalize_direction(direction, weights, norm='filter'):
+    """
+        Rescale the direction so that it has similar norm as their corresponding
+        model in different levels.
+
+        Args:
+          direction: a variables of the random direction for one layer
+          weights: a variable of the original model for one layer
+          norm: normalization method, 'filter' | 'layer' | 'weight'
+    """
+    if norm == 'filter':
+        # Rescale the filters (weights in group) in 'direction' so that each
+        # filter has the same norm as its corresponding filter in 'weights'.
+        for d, w in zip(direction, weights):
+            d.mul_(w.norm()/(d.norm() + 1e-10))
+    elif norm == 'layer':
+        # Rescale the layer variables in the direction so that each layer has
+        # the same norm as the layer variables in weights.
+        direction.mul_(weights.norm()/direction.norm())
+    elif norm == 'weight':
+        # Rescale the entries in the direction so that each entry has the same
+        # scale as the corresponding weight.
+        direction.mul_(weights)
+    elif norm == 'dfilter':
+        # Rescale the entries in the direction so that each filter direction
+        # has the unit norm.
+        for d in direction:
+            d.div_(d.norm() + 1e-10)
+    elif norm == 'dlayer':
+        # Rescale the entries in the direction so that each layer direction has
+        # the unit norm.
+        direction.div_(direction.norm())
+
+
+def normalize_directions_for_weights(direction, weights, norm='filter', ignore='biasbn'):
+    assert(len(direction) == len(weights))
+    for d, w in zip(direction, weights):
+        if d.dim() <= 1:
+            if ignore == 'biasbn':
+                d.fill_(0) # ignore directions for weights with 1 dimension
+            else:
+                d.copy_(w) # keep directions for weights/bias that are only 1 per node
+        else:
+            normalize_direction(d, w, norm)
+
+def create_random_direction(net,weight, dir_type='weights', ignore='biasbn', norm='filter'):
+    # weights = get_weights(net) # a list of parameters.
+    direction = get_random_weights(weight)
+    normalize_directions_for_weights(direction, weight, norm, ignore)
+    return direction
+
+def train_net(model, train_loader, optimizer, criterion, epoch):
+    model.train()
+    losses = AverageMeter()
+
+    for batch_id, (data, target) in enumerate(train_loader):
+        data, target = data.cuda(), target.cuda()
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output,target)
+        loss.backward()
+        optimizer.step()
+
+        losses.update(loss.item(), data.size(0))
+    
+    return losses.avg
+
+
+
+def test(model, test_loader, criterion):
+    model.cuda().eval()
+    accuracys = AverageMeter()
+    losses = AverageMeter()
+    stime = time()
+    with torch.no_grad():
+        for batch_id, (data, target) in enumerate(test_loader):
+            data, target = Variable(data).cuda(), Variable(target).cuda()
+            
+            output = model(data)
+            
+            loss = criterion(output,target)
+            acc = accuracy(output.data, target)[0]
+            accuracys.update(acc.item(),data.size(0))
+            losses.update(loss.item(), data.size(0))
+            
+    print("cost: ", time() - stime)
+    return accuracys.avg, losses.avg
+
+
+
+def eval_loss(model, criterion, dataloader):
+    model.eval()
+    losses = AverageMeter()
+    accuracy_ave = AverageMeter()
+    with torch.no_grad():
+        for batch_idx, (input_data, target) in enumerate(dataloader):
+            input_data = input_data.cuda()
+            target = target.cuda()
+
+            output = model(input_data)
+            loss = criterion(output, target)
+            _, predicted = torch.max(output.data, 1)
+            accuaray = predicted.eq(target).sum().item()
+
+            losses.update(loss.item(), input_data.shape[0])
+            accuracy_ave.update(accuaray, input_data.shape[0])
+    
+    return losses.avg, accuracy_ave.avg
+

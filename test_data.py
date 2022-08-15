@@ -1,51 +1,23 @@
 import argparse
+from ast import arg
 from enum import EnumMeta
 import os
 from statistics import mode
 
 from numpy import save
-from utils import get_model, set_seed, get_datasets, AverageMeter, accuracy
+from utils import get_model, get_weights, set_seed, get_datasets, AverageMeter, accuracy, test, train_net
 from torchvision import datasets, transforms
 import torch
 import torch.nn as nn
 import numpy as np
+from visualization import plot
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
-
-def train_net(model, train_loader, optimizer, criterion, epoch):
-    model.train()
-    losses = AverageMeter()
-
-    for batch_id, (data, target) in enumerate(train_loader):
-        data, target = data.cuda(), target.cuda()
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output,target)
-        loss.backward()
-        optimizer.step()
-
-        losses.update(loss.item(), data.size(0))
-    
-    return losses.avg
-
-def test(model, test_loader, criterion):
-    model.eval()
-    accuracys = AverageMeter()
-    with torch.no_grad():
-        for batch_id, (data, target) in enumerate(test_loader):
-            data, target = data.cuda(), target.cuda()
-            output = model(data)
-            acc = accuracy(output.data, target)[0]
-            accuracys.update(acc.item(),data.size(0))
-            pass
-    
-    return accuracys.avg
-
 
 
 def main():
     parser = argparse.ArgumentParser(description='a single test to get familiar with the code')
-    parser.add_argument('--arch', default='resnet32')
+    parser.add_argument('--arch', default='resnet56')
     parser.add_argument('--datasets', default='CIFAR10')
     parser.add_argument('--workers', default=4, type=int)
     parser.add_argument('--randomseed', default=1, type=int)
@@ -59,6 +31,9 @@ def main():
     parser.add_argument('--optimizer', default='sgd')
     parser.add_argument('--save_dir', default='./../checkpoints/visualization')
     parser.add_argument('--name', default='test_visualization')
+    parser.add_argument('--load_path', default='')
+    parser.add_argument('--x', default='-1:1:51', help='A string with format xmin:x_max:xnum')
+    parser.add_argument('--y', default='-1:1:51', help='A string with format ymin:ymax:ynum')
 
 
 
@@ -69,11 +44,18 @@ def main():
     print(len(train_loader.dataset))
     print(len(val_loader.dataset))
     model = get_model(args)
+    weight = get_weights(model)
     if args.mult_gpu:
         model = torch.nn.DataParallel(model)
 
     model.cuda()
+    if args.load_path:
+        if os.path.isfile(args.load_path):
+            print("=> loading checkpoint '{}'".format(args.load_path))
+            checkpoint = torch.load(args.load_path)
+            model.load_state_dict(checkpoint['state_dict'])
     torch.backends.cudnn.benchmark = True
+
     criterion = nn.CrossEntropyLoss().cuda()
 
     if args.optimizer == 'sgd':
@@ -97,23 +79,40 @@ def main():
     if not os.path.isdir(save_path):
         os.mkdir(save_path)
 
-    final_checkpoint = os.path.join(save_path, 'save_net_' + args.arch + '_' + str(args.epoch-1))
+    final_checkpoint = os.path.join(save_path, 'save_net_' + args.arch + '_' + str(args.epoch))
     if os.path.isfile(final_checkpoint):
         print('you have trained before ...')
     else:
-        torch.save(model.state_dict(), os.path.join(save_path, 'save_net_' + args.arch + '_' + str(0)))
+        torch.save({'epoch': 0, 'state_dict': model.state_dict()}, os.path.join(save_path, 'save_net_' + args.arch + '_' + str(0).zfill(len(str(args.epoch))) + '.pt'))
         orig_loss = []
         orig_acc = []
         for epoch in range(args.epoch):
             print("Epoch %i"%(epoch))
+            
             tloss = train_net(model, train_loader, optimizer, criterion, epoch)
             orig_loss.append(tloss)
-            accu = test(model, val_loader, criterion)
+            accu, loss = test(model, val_loader, criterion)
             orig_acc.append(accu)
-            torch.save(model.state_dict(), os.path.join(save_path, 'save_net_' + args.arch + '_' + str(epoch)))
+            print(accu)
+            torch.save({'epoch': epoch+1, 'state_dict': model.state_dict()}, os.path.join(save_path, 'save_net_' + args.arch + '_' + str(epoch+1).zfill(len(str(args.epoch)))+ '.pt'))
+            
 
-        np.save(os.path.join(save_path, 'save_net_' + args.arch + '_orig_loss' ), orig_loss)
-        np.save(os.path.join(save_path, 'save_net_' + args.arch + '_orig_acc' ), orig_acc)
+        np.save(os.path.join(save_path, 'save_net_' + args.arch + '_orig_loss.npy' ), orig_loss)
+        np.save(os.path.join(save_path, 'save_net_' + args.arch + '_orig_acc.npy' ), orig_acc)
+
+        fileindices=np.linspace(0,args.epoch,args.epoch + 1)
+        filesname = [save_path + '/save_net_' + args.arch + '_' +str(int(i)).zfill(len(str(args.epoch)))+ '.pt' for i in fileindices]
+
+        args.xmin, args.xmax, args.xnum = [float(a) for a in args.x.split(':')]
+        args.xnum = int(args.xnum)
+        args.ymin, args.ymax, args.ynum = [float(a) for a in args.y.split(':')]
+        args.ynum = int(args.ynum)
+
+        xcoordinates = np.linspace(args.xmin, args.xmax, num=args.xnum)
+        ycoordinates = np.linspace(args.ymin, args.ymax, num=args.ynum)
+        print('begin plot')
+
+        plot(model,weight,train_loader,criterion, xcoordinates, ycoordinates)
 
 
 
@@ -125,10 +124,6 @@ def main():
 
 
 
-    
-
-
-    pass
 
 if __name__ == "__main__":
     main()
